@@ -1,0 +1,32 @@
+[project]
+name = "engram"
+version = "0.1.0"
+description = "A hippocampal-neocortical memory architecture for long-horizon LLM agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.3",
+    "scipy>=1.18.1",
+]
+
+[project.optional-dependencies]
+bench = [
+    "sentence-transformers>=6.1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
