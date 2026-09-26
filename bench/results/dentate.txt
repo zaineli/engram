@@ -1,0 +1,21 @@
+encoder=minilm  n=600
+input space: mean pairwise cosine=0.472  max=1.000
+
+separation: input cosine -> DG code overlap
+  cos=0.641 -> overlap=0.140
+  cos=0.766 -> overlap=0.220
+  cos=0.993 -> overlap=0.627
+  cos=0.414 -> overlap=0.070
+
+neurogenesis sweep (whole stream encoded, then sampled pairs)
+     ng  mean ovl   p95 ovl  coverage    gini
+   0.00    0.1141    0.2979     0.221   0.883
+   0.35    0.0468    0.1296     0.593   0.652
+   0.70    0.0205    0.0517     0.792   0.384
+   1.00    0.0175    0.0517     0.841   0.305
+
+lateral inhibition (documented no-op for random projections)
+  Gram off-diagonal mean=0.02033   activation sd=0.9972
+  suppression at inhibition=0.25 is 0.00508, ~196x below the activation scale
+  code agreement on/off: mean Jaccard=0.8812 (min=0.7429) over 100 inputs
+  mean pairwise code overlap: inhibition off=0.1277 on=0.1284

@@ -1,0 +1,23 @@
+{
+ "encoder": "minilm",
+ "n": 125,
+ "cosine_mean": 0.528587281703949,
+ "cosine_max": 0.9984237551689148,
+ "results": {
+  "dense cosine": {
+   "key@1": 0.04,
+   "key_rr": 0.16772664303784238,
+   "class@1": 0.2
+  },
+  "dentate expansion": {
+   "key@1": 0.048,
+   "key_rr": 0.14705922895532572,
+   "class@1": 0.24
+  },
+  "conjunctive binding": {
+   "key@1": 0.2,
+   "key_rr": 0.45666666666666705,
+   "class@1": 1.0
+  }
+ }
+}

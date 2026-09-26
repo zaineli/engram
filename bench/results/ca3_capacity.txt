@@ -1,0 +1,25 @@
+encoder=minilm
+
+capacity vs store size, 90% of cue units deleted
+       n  accuracy  ms/query
+     400     0.993      0.13
+    1000     0.987      0.19
+    2000     0.967      0.32
+    4000     0.907      0.64
+
+degradation curve at n=2000 (sparsity 0.02, k=61)
+   deleted  units kept  accuracy
+      50%          30     1.000
+      80%          12     1.000
+      90%           6     0.967
+      95%           3     0.620
+      97%           2     0.220
+      98%           1     0.007
+
+sparsity vs completion (n=2000, 90% deleted)
+   sparsity     k  accuracy
+      0.005    15     0.050
+      0.010    31     0.930
+      0.020    61     0.990
+      0.050   154     0.960
+      0.100   307     0.450

@@ -1,0 +1,19 @@
+219 schemas in the store; 12 whose first exemplar names Priya
+Priya's projects: {'atlas': 30, 'ledger': 6, 'ingest': 5, 'orchestrator': 4, 'beacon': 3, 'quarry': 2}
+
+similarity    mass  first exemplar
+     0.562     4.1  In week 6 on Monday, Priya reviewed the ingest incident report in the Kyoto lab.
+     0.536    33.3  In week 8 on Sunday, Priya signed off on the atlas migration plan in a video call.
+     0.512    27.2  In week 1 on Wednesday, Priya drafted the atlas runbook in a video call.
+     0.493     9.5  In week 12 on Saturday, Priya benchmarked the ledger incident report in the Kyoto lab.
+     0.491    14.0  In week 1 on Monday, Priya rewrote the atlas load test in the Berlin hub.
+     0.480    20.7  In week 3 on Tuesday, Priya rolled back the ledger schema diff in the Oakland office.
+     0.479     3.9  In week 5 on Saturday, Priya benchmarked the beacon schema diff in the Austin annex.
+     0.477    53.2  In week 4 on Monday, Priya reviewed the atlas rollout checklist in the Oakland office.
+     0.476     3.8  In week 15 on Tuesday, Priya benchmarked the ingest rollout checklist in the Oakland office.
+     0.462     2.4  In week 8 on Wednesday, Priya rewrote the ingest migration plan in the Berlin hub.
+     0.438     5.2  In week 12 on Wednesday, Priya rewrote the beacon rollout checklist in the Berlin hub.
+     0.311    13.9  In week 12 on Tuesday, Priya benchmarked the atlas schema diff in the Kyoto lab.
+
+similarity 0.311-0.562; mass 2.4-53.2
+slow-store answer: In week 8 on Sunday, Priya signed off on the atlas migration plan in a video call.
