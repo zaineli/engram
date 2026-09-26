@@ -41,7 +41,7 @@ Two refinements were implemented. Only one survived measurement.
     inhibition 0.25 is roughly 200x below the activation scale. It is not
     literally inert — it perturbs about 12% of the selected units (mean Jaccard
     0.88 against the uninhibited code) — but it buys no separation: mean
-    pairwise code overlap is 0.2229 without it and 0.2255 with it, marginally
+    pairwise code overlap is 0.1277 without it and 0.1284 with it, marginally
     worse. Retained behind a default-zero parameter because it becomes relevant
     if ``W`` is ever learned rather than sampled, at which point column
     correlation is real. Measured in ``bench/ablate_dg.py``.

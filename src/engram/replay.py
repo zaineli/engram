@@ -21,8 +21,10 @@ i.i.d. would hand the neocortex a bag of disconnected facts.
 omit. The entire reason for a slow second store is to avoid catastrophic
 interference, and a slow store fed only new material interferes with itself
 just as badly as a fast one. Each ripple therefore mixes fresh traces with a
-sample of already-consolidated ones. ``bench/ablate_replay.py`` measures what
-turning this off costs.
+sample of already-consolidated ones. What turning this off costs has not been
+measured: the schema store is scored only through the abstraction task, which
+has one query per person and cannot resolve it. An earlier version of this
+docstring cited a ``bench/ablate_replay.py`` that was never written.
 """
 
 from __future__ import annotations

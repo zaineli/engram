@@ -16,17 +16,17 @@ implementation of it.
         print(r.score, r.episode.text)
 """
 
-from .binding import ConjunctiveBinder
+from .binding import ConjunctionIndex, ConjunctiveBinder, content_terms
 from .ca1 import CA1
 from .ca3 import CA3, CompletionResult
 from .dentate import DentateGyrus, separation_gain
 from .encoding import Encoder, HashingEncoder, SentenceTransformerEncoder, ThetaContext
-from .memory import EngramConfig, EngramMemory
+from .memory import FUSIONS, EngramConfig, EngramMemory
 from .neocortex import Neocortex
 from .replay import ReplayScheduler
 from .types import ConsolidationEvent, Episode, Recall, Schema, Trace
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "EngramMemory",
@@ -37,6 +37,9 @@ __all__ = [
     "CompletionResult",
     "CA1",
     "ConjunctiveBinder",
+    "ConjunctionIndex",
+    "content_terms",
+    "FUSIONS",
     "Neocortex",
     "ReplayScheduler",
     "ThetaContext",

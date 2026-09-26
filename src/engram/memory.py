@@ -20,29 +20,31 @@ ways, and because keeping them separable is what makes the ablation in
     flat vector stores consist entirely of. Fails on confusable near-duplicates.
 
 ``conjunctive``
-    Conjunction-code intersection (:mod:`engram.binding`). Resolves the case
-    where the semantic pathway collapses: episodes sharing a frame and
-    differing only in which value filled which slot. On the incident-report set
-    this pathway takes top-1 from 0.040 to 0.200, the ceiling for that query
-    set. The dentate/CA3 pair is *not* used for ranking — it was measured at
-    0.056 there, no better than cosine, because expansion cannot separate what
-    the input never distinguished. Its job is storage-side separation and
-    fragment completion, which is what it is good at.
+    Weighted conjunction-code intersection (:mod:`engram.binding`). Resolves
+    the case where the semantic pathway collapses: episodes sharing a frame and
+    differing only in which value filled which slot. The dentate/CA3 pair is
+    *not* used for ranking — it was measured at 0.048 top-1 on the
+    incident-report set, no better than cosine, because expansion cannot
+    separate what the input never distinguished. Its job is storage-side
+    separation and fragment completion, which is what it is good at.
 
 ``temporal``
     Theta-context similarity. Answers "what happened around then" and recovers
-    order, which neither of the content pathways can do.
+    order, which neither of the content pathways can do. Opt-in: it needs the
+    caller to say which session and position it is asking about.
 
 ``schema``
     Neocortical gist. The only pathway that can answer a question whose answer
     was never in any single episode.
 
-On top of the four, a directional query ("what happened right after...") also
-triggers **temporal context reinstatement**: the anchor episode is retrieved on
-content, its encoding context is reinstated, and that context cues the adjacent
-slots while the anchor itself is suppressed. This is the one operation that
-makes sequence questions answerable at all — every pure-retrieval baseline
-returns the anchor and scores zero.
+On top of the four, a query that names an episode and asks for its *adjacent*
+one ("what did she do right after...") triggers **temporal context
+reinstatement**: the anchor episode is retrieved on content, its encoding
+context is reinstated, and that context cues the adjacent slots while the
+anchor itself is suppressed. A looser temporal word ("how many days before the
+move did I...") does not trigger it. Those questions relate events days apart
+and usually need the anchor as evidence too; see ``_ADJACENT`` for the measured
+reason.
 
 Sleep
 -----
@@ -56,31 +58,43 @@ two destroyed exactly the information the architecture exists to protect.
 
 from __future__ import annotations
 
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
+from .binding import ConjunctionIndex, ConjunctiveBinder
 from .ca1 import CA1
 from .ca3 import CA3
 from .dentate import DentateGyrus
-import re
-
-from .binding import ConjunctiveBinder
 from .encoding import Encoder, HashingEncoder, ThetaContext
 from .neocortex import Neocortex
 from .replay import ReplayScheduler
 from .types import Episode, Recall, Trace
 
-__all__ = ["EngramMemory", "EngramConfig"]
+__all__ = ["EngramMemory", "EngramConfig", "FUSIONS"]
 
-#: Relational cues that make a query a question about *sequence* rather than
-#: content. "What happened right after the migration review" names one episode
-#: and asks for a different one, so content matching alone retrieves the anchor
-#: and scores it as a miss — which is exactly what every baseline does on the
-#: temporal task, all of them landing on 0.242.
-_AFTER = re.compile(r"\b(right after|just after|after|following|next|then|subsequently|later that)\b", re.I)
-_BEFORE = re.compile(r"\b(right before|just before|before|preceding|prior to|leading up to)\b", re.I)
+#: Adjacency cues: the query names one episode and asks for its neighbour.
+#: "What did Priya do right after she signed off on the migration plan" names
+#: an anchor and asks for a different episode, so content matching alone
+#: retrieves the anchor, which is the one answer guaranteed to be wrong.
+#:
+#: v0.1 fired on any of ``after|following|next|then|before|prior to|...``. On
+#: LongMemEval-S those words appear in 28 of the 470 answerable questions, and
+#: nearly all of them are of the form "how many days before X did I do Y",
+#: where X is part of the evidence. Suppressing the anchor there removes a gold
+#: item. The cue list is now restricted to explicit adjacency.
+_ADJ_AFTER = re.compile(
+    r"\b(?:right|just|immediately|straight)\s+(?:after|following)\b"
+    r"|\bwhat\s+(?:came|happened)\s+next\b",
+    re.I,
+)
+_ADJ_BEFORE = re.compile(
+    r"\b(?:right|just|immediately|straight)\s+before\b"
+    r"|\bwhat\s+(?:came|happened)\s+(?:just\s+)?before\b",
+    re.I,
+)
 
 #: Generalisation cues. These route the query to the slow store. "Which project
 #: does Priya *usually* work on" is not a question about an episode — no episode
@@ -94,10 +108,49 @@ _GENERIC = re.compile(
     re.I,
 )
 
+#: Per-pathway score normalisations. See :func:`_normalise`.
+FUSIONS = ("minmax", "zscore", "rrf")
+
+
+def _normalise(v: np.ndarray, how: str, rrf_k: float = 60.0) -> np.ndarray:
+    """Put one pathway's scores on a common scale before the weighted sum.
+
+    ``minmax`` maps the candidate range to [0, 1], so a single outlier sets the
+    scale for everything else. ``zscore`` centres and divides by the standard
+    deviation over the candidates, the combiner that lexical-dense fusion work
+    on conversational memory has found more robust than min-max. ``rrf`` throws
+    the scores away and keeps the rank, ``1 / (rrf_k + rank)``: parameter-free
+    and immune to scale, at the price of ignoring how far apart two candidates
+    were. A pathway that is constant over the candidates carries no
+    information and contributes zero under all three.
+    """
+    if v.size == 0:
+        return v
+    if how == "rrf":
+        if float(v.max() - v.min()) < 1e-9:
+            return np.zeros_like(v)
+        ranks = np.empty(v.size, dtype=np.float64)
+        ranks[np.argsort(-v, kind="stable")] = np.arange(1, v.size + 1)
+        return 1.0 / (rrf_k + ranks)
+    if how == "zscore":
+        sd = float(v.std())
+        return np.zeros_like(v) if sd < 1e-9 else (v - float(v.mean())) / sd
+    if how == "minmax":
+        lo, hi = float(v.min()), float(v.max())
+        return np.zeros_like(v) if hi - lo < 1e-6 else (v - lo) / (hi - lo)
+    raise ValueError(f"unknown fusion {how!r}; expected one of {FUSIONS}")
+
 
 @dataclass
 class EngramConfig:
-    """Everything tunable, in one place so the benchmark can sweep it."""
+    """Everything tunable, in one place so the benchmark can sweep it.
+
+    The four settings marked *frozen* were chosen on the LongMemEval-S
+    dev split (``bench/longmemeval.py tune``: 294 configurations, objective the
+    mean of the four official headline metrics) and then fixed before the test
+    split or the synthetic benchmark was scored with them. v0.1's values were
+    ``conj_window=None`` (all pairs), ``w_conjunctive=1.2`` and a 2**16 code.
+    """
 
     expansion: int = 8
     sparsity: float = 0.02
@@ -105,8 +158,14 @@ class EngramConfig:
     beta: float = 22.0
     context_dim: int = 32
 
-    conj_width: int = 1 << 16
+    conj_width: int = 1 << 32
     conj_order: int = 2
+    #: Pair window in content terms (SDM's ``#uwN``). None = every pair.
+    conj_window: int | None = 4  # frozen
+    #: "idf" weights each conjunction unit by its own document frequency in a
+    #: cosine; "binary" counts shared units, as v0.1 did; "bm25" scores units
+    #: with BM25's saturation and length normalisation. See ConjunctionIndex.
+    conj_weighting: str = "idf"  # frozen
 
     schema_merge_threshold: float = 0.72
     replay_batch: int = 32
@@ -121,9 +180,13 @@ class EngramConfig:
     decay_rate: float = 0.9995
     decay_floor: float = 0.05
 
+    #: How pathway scores are normalised before fusion: one of ``FUSIONS``.
+    fusion: str = "minmax"  # frozen
+    rrf_k: float = 60.0
+
     # Pathway fusion weights. Set any to 0 to ablate that pathway.
     w_semantic: float = 1.0
-    w_conjunctive: float = 1.2
+    w_conjunctive: float = 0.9  # frozen
     w_temporal: float = 0.25
     w_schema: float = 0.6
 
@@ -146,6 +209,8 @@ class EngramMemory:
 
     def __init__(self, encoder: Encoder | None = None, config: EngramConfig | None = None) -> None:
         self.cfg = config or EngramConfig()
+        if self.cfg.fusion not in FUSIONS:
+            raise ValueError(f"unknown fusion {self.cfg.fusion!r}; expected one of {FUSIONS}")
         self.encoder = encoder or HashingEncoder(dim=384)
         d = self.encoder.dim
 
@@ -160,7 +225,10 @@ class EngramMemory:
         self.ca3 = CA3(self.dg.dim_out, beta=self.cfg.beta)
         self.ca1 = CA1()
         self.neocortex = Neocortex(d, merge_threshold=self.cfg.schema_merge_threshold)
-        self.binder = ConjunctiveBinder(width=self.cfg.conj_width, order=self.cfg.conj_order)
+        self.binder = ConjunctiveBinder(
+            width=self.cfg.conj_width, order=self.cfg.conj_order, window=self.cfg.conj_window
+        )
+        self.conj_index = ConjunctionIndex(weighting=self.cfg.conj_weighting)
         self.theta = ThetaContext(dim=self.cfg.context_dim)
         self.replay = ReplayScheduler(
             batch=self.cfg.replay_batch,
@@ -172,6 +240,7 @@ class EngramMemory:
         )
         self._n_written = 0
         self._session_counts: dict[int, int] = {}
+        self._matrix: tuple[list[int], np.ndarray, np.ndarray] | None = None
 
     # ---------------------------------------------------------------- write
 
@@ -184,6 +253,25 @@ class EngramMemory:
         meta: dict | None = None,
     ) -> Trace:
         """Encode and store one experience."""
+        dense = self.encoder.encode([text])[0]
+        return self._write(text, dense, session, salience, timestamp, meta)
+
+    def remember_many(self, texts: list[str], session: int = 0, **kw) -> list[Trace]:
+        """Store several experiences in order, embedding them in one batch."""
+        if not texts:
+            return []
+        dense = self.encoder.encode(list(texts))
+        return [self._write(t, v, session, **kw) for t, v in zip(texts, dense)]
+
+    def _write(
+        self,
+        text: str,
+        dense: np.ndarray,
+        session: int,
+        salience: float = 0.0,
+        timestamp: float | None = None,
+        meta: dict | None = None,
+    ) -> Trace:
         pos = self._session_counts.get(session, 0)
         self._session_counts[session] = pos + 1
         ep = Episode(
@@ -194,10 +282,9 @@ class EngramMemory:
             meta=meta or {},
             salience=salience,
         )
-        dense = self.encoder.encode([text])[0]
         surprise = self.ca1.novelty(dense)  # computed before the write
         code = self.dg.encode(dense, learn=True)
-        conj = self.binder.encode(text)
+        conj, conj_tf, conj_len = self.binder.encode_counts(text)
         ctx = self.theta.encode(session, pos)
 
         tr = Trace(
@@ -210,126 +297,146 @@ class EngramMemory:
         )
         slot = self.ca3.store(code)
         self.ca1.bind(slot, tr)
+        self.conj_index.add(slot, conj, conj_tf, conj_len)
+        self._matrix = None
         self._n_written += 1
 
         for dead in self.ca1.decay(self.cfg.decay_rate, self.cfg.decay_floor):
             self.ca1.release(dead)
-            self.ca3.remove(dead)
+        self._reconcile()
         return tr
 
-    def remember_many(self, texts: list[str], session: int = 0, **kw) -> list[Trace]:
-        return [self.remember(t, session=session, **kw) for t in texts]
+    def _reconcile(self) -> None:
+        """Drop every per-slot structure whose trace CA1 no longer holds.
+
+        CA1 is the source of truth for residency. Decay and capacity eviction
+        both release from CA1 directly; v0.1 removed the CA3 pattern after
+        decay but not after eviction, so an evicted trace's attractor stayed
+        in CA3 and could still capture a completion.
+        """
+        live = set(self.ca1.slots())
+        stale = [s for s in self.conj_index.keys() if s not in live]
+        for s in stale:
+            self.conj_index.remove(s)
+            self.ca3.remove(s)
+        if stale:
+            self._matrix = None
+
+    #: Config fields that only the read path consults. Changing them on a
+    #: populated memory is exactly equivalent to rebuilding it with them.
+    READ_TIME = frozenset({
+        "fusion", "rrf_k", "w_semantic", "w_conjunctive", "w_temporal", "w_schema",
+        "w_reinstate", "reinstate_span", "schema_generic_boost", "conj_weighting",
+    })
+
+    def reconfigure(self, **read_time) -> None:
+        """Change read-time settings without re-ingesting (used by parameter sweeps)."""
+        bad = set(read_time) - self.READ_TIME
+        if bad:
+            raise ValueError(f"not read-time settings, would need a rebuild: {sorted(bad)}")
+        if read_time.get("fusion", self.cfg.fusion) not in FUSIONS:
+            raise ValueError(f"unknown fusion {read_time['fusion']!r}")
+        self.cfg = replace(self.cfg, **read_time)
+        self.conj_index.set_weighting(self.cfg.conj_weighting)
 
     # ----------------------------------------------------------------- read
+
+    def _stacked(self) -> tuple[list[int], np.ndarray, np.ndarray]:
+        if self._matrix is None:
+            slots = self.ca1.slots()
+            traces = [self.ca1.get(s) for s in slots]
+            d = self.encoder.dim
+            D = np.stack([t.dense for t in traces]) if traces else np.zeros((0, d), np.float32)
+            C = (
+                np.stack([t.context for t in traces])
+                if traces
+                else np.zeros((0, self.cfg.context_dim), np.float32)
+            )
+            self._matrix = (slots, D, C)
+        return self._matrix
+
+    def _encode_query(self, query: str) -> np.ndarray:
+        enc = getattr(self.encoder, "encode_query", None) or self.encoder.encode
+        return enc([query])[0]
 
     def recall(
         self,
         query: str,
-        k: int = 5,
+        k: int | None = 5,
         session: int | None = None,
         position: int | None = None,
         include_schemas: bool = True,
+        rehearse: bool = True,
+        dedup: bool = True,
     ) -> list[Recall]:
-        """Retrieve up to ``k`` items, fusing all four pathways."""
+        """Retrieve up to ``k`` items, fusing all four pathways.
+
+        ``k=None`` returns the full ranking. ``rehearse=False`` makes the call
+        read-only: by default a recalled trace is strengthened, which is the
+        intended behaviour for an agent and the wrong one for an evaluation,
+        where it makes each query's score depend on the queries before it.
+        ``dedup`` collapses items with identical text into their best copy.
+        """
         cfg = self.cfg
-        q = self.encoder.encode([query])[0]
-        slots = self.ca1.slots()
+        q = self._encode_query(query)
+        slots, D, C = self._stacked()
+        n = len(slots)
+        out: list[Recall] = []
 
-        scored: dict[int, dict[str, float]] = {}
-
-        if slots:
-            traces = [self.ca1.get(s) for s in slots]
-            D = np.stack([t.dense for t in traces])
-            sem = D @ q
-            for s, v in zip(slots, sem):
-                scored.setdefault(s, {})["semantic"] = float(v)
-
+        if n:
+            raw: dict[str, np.ndarray] = {"semantic": D @ q}
             if cfg.w_conjunctive > 0:
-                qc = self.binder.encode(query)
-                for s, t in zip(slots, traces):
-                    scored.setdefault(s, {})["conjunctive"] = self.binder.match(qc, t.conj_idx)
-
+                keys, s = self.conj_index.score(self.binder.encode(query))
+                pos_of = {key: i for i, key in enumerate(keys)}
+                raw["conjunctive"] = np.array([s[pos_of[sl]] for sl in slots], dtype=np.float64)
             if cfg.w_temporal > 0 and session is not None:
                 ctx = self.theta.encode(session, position if position is not None else 0)
-                C = np.stack([t.context for t in traces])
-                tsim = C @ ctx
-                for s, v in zip(slots, tsim):
-                    scored.setdefault(s, {})["temporal"] = float(v)
+                raw["temporal"] = C @ ctx
 
-        # ---- normalise each pathway before fusing --------------------------
-        # The pathways live on incompatible scales: dense cosine spans roughly
-        # 0.45-0.55 across candidates while conjunction overlap spans 0.0-0.3.
-        # Summing them raw lets whichever happens to have the larger absolute
-        # range dominate regardless of how discriminative it is, which is why an
-        # earlier revision could delete the entire schema pathway and move no
-        # number at all — it was scoring 0.30 against a hippocampal 0.57 and
-        # could never rank first. Min-max per pathway makes the weights mean
-        # what they say: relative contribution to the ranking.
-        slot_ids = list(scored.keys())
-        for pathway in ("semantic", "conjunctive", "temporal"):
-            vals = np.array([scored[s].get(pathway, 0.0) for s in slot_ids], dtype=np.float32)
-            if vals.size == 0:
-                continue
-            lo, hi = float(vals.min()), float(vals.max())
-            rng = hi - lo
-            if rng < 1e-6:
-                # Uniform pathway carries no information; contribute nothing
-                # rather than a constant that shifts every candidate equally.
-                for s in slot_ids:
-                    scored[s][f"{pathway}_n"] = 0.0
-            else:
-                for s, v in zip(slot_ids, vals):
-                    scored[s][f"{pathway}_n"] = float((v - lo) / rng)
+            # ---- normalise each pathway before fusing ----------------------
+            # The pathways live on incompatible scales: dense cosine spans
+            # roughly 0.45-0.55 across candidates while conjunction overlap
+            # spans 0.0-0.3. Summing them raw lets whichever happens to have
+            # the larger absolute range dominate regardless of how
+            # discriminative it is, which is why an earlier revision could
+            # delete the entire schema pathway and move no number at all.
+            weights = {"semantic": cfg.w_semantic, "conjunctive": cfg.w_conjunctive,
+                       "temporal": cfg.w_temporal}
+            normed = {p: _normalise(v.astype(np.float64), cfg.fusion, cfg.rrf_k)
+                      for p, v in raw.items()}
+            total = np.zeros(n, dtype=np.float64)
+            for p, v in normed.items():
+                total += weights[p] * v
+            if cfg.fusion == "zscore":
+                # z-scores are signed; shift so the worst candidate sits at 0.
+                # Ranking is unchanged, and the multiplicative terms below
+                # (decay, anchor suppression) keep their meaning.
+                total -= float(total.min())
 
-        out: list[Recall] = []
-        for s, ev in scored.items():
-            tr = self.ca1.get(s)
-            if tr is None:
-                continue
-            total = (
-                cfg.w_semantic * ev.get("semantic_n", 0.0)
-                + cfg.w_conjunctive * ev.get("conjunctive_n", 0.0)
-                + cfg.w_temporal * ev.get("temporal_n", 0.0)
-            )
-            # A trace that has decayed is less retrievable, as in the biology.
-            total *= 0.85 + 0.15 * tr.strength
-            out.append(Recall(episode=tr.episode, score=float(total), evidence=dict(ev)))
+            for i, s in enumerate(slots):
+                tr = self.ca1.get(s)
+                ev = {p: float(raw[p][i]) for p in raw}
+                ev.update({f"{p}_n": float(normed[p][i]) for p in normed})
+                # A trace that has decayed is less retrievable, as in the biology.
+                score = float(total[i]) * (0.85 + 0.15 * tr.strength)
+                out.append(Recall(episode=tr.episode, score=score, evidence=ev))
 
-        if include_schemas and cfg.w_schema > 0 and len(self.neocortex):
-            # A schema whose exemplar is already on the hippocampal list is the
-            # same memory arriving twice; keep the episodic copy, which carries
-            # the real key and provenance.
-            # Dedup happens *after* ranking, not here. Filtering schema
-            # exemplars against every hippocampal candidate deleted the entire
-            # pathway: a schema's exemplar is by construction one of the stored
-            # episodes, and `out` holds all of them, so the filter matched
-            # everything and the slow store silently contributed nothing.
-            sch = list(self.neocortex.query(q, top_k=max(4, k)))
-            if sch:
-                # Express schema scores in hippocampal units so the weight is a
-                # real routing decision rather than an arbitrary constant that
-                # happens to sit below every episodic score.
-                hmax = max((r.score for r in out), default=1.0) or 1.0
-                w = cfg.w_schema * (cfg.schema_generic_boost if _GENERIC.search(query) else 1.0)
-                vals = np.array([r.score for r in sch], dtype=np.float32)
-                lo, hi = float(vals.min()), float(vals.max())
-                rng = hi - lo
-                for r in sch:
-                    norm = (r.score - lo) / rng if rng > 1e-6 else 1.0
-                    r.score = w * hmax * float(norm)
-                    r.evidence["routed_generic"] = float(bool(_GENERIC.search(query)))
-                    out.append(r)
+        # The schema pathway is scaled to the best episodic content score, taken
+        # before any reinstatement bonus, as in v0.1.
+        hmax = max((r.score for r in out), default=1.0) or 1.0
 
         # ---- temporal context reinstatement -------------------------------
-        # A directional cue means the query names an *anchor* and asks for its
+        # An adjacency cue means the query names an *anchor* and asks for its
         # neighbour. Retrieve the anchor on content, reinstate its encoding
-        # context, and let that context cue the slots adjacent to it. Without
-        # this the system confidently returns the anchor itself, which is the
-        # one episode guaranteed to be wrong.
-        direction = 1 if _AFTER.search(query) else (-1 if _BEFORE.search(query) else 0)
+        # context, and let that context cue the slots adjacent to it. The
+        # anchor is chosen among episodes only: v0.1 could pick a schema hit,
+        # whose placeholder key (0, 0) then "reinstated" the first episode of
+        # session 0.
+        direction = 1 if _ADJ_AFTER.search(query) else (-1 if _ADJ_BEFORE.search(query) else 0)
         if direction and cfg.w_reinstate > 0 and out:
             anchor = max(out, key=lambda r: r.score)
             a_sess, a_pos = anchor.episode.key()
+            a_score = anchor.score
             for r in out:
                 sess, pos = r.episode.key()
                 if sess != a_sess:
@@ -337,31 +444,58 @@ class EngramMemory:
                 offset = (pos - a_pos) * direction
                 if 1 <= offset <= cfg.reinstate_span:
                     # Nearest neighbour gets the full bonus, decaying with distance.
-                    r.score += cfg.w_reinstate * anchor.score / offset
+                    r.score += cfg.w_reinstate * a_score / offset
                     r.evidence["reinstated"] = float(offset)
                 elif offset == 0:
                     # Suppress the anchor: it is what was asked *about*, not for.
                     r.score *= 0.15
                     r.evidence["anchor"] = 1.0
 
+        if include_schemas and cfg.w_schema > 0 and len(self.neocortex):
+            # Dedup happens *after* ranking, not here. Filtering schema
+            # exemplars against every hippocampal candidate deleted the entire
+            # pathway: a schema's exemplar is by construction one of the stored
+            # episodes, so the filter matched everything and the slow store
+            # silently contributed nothing.
+            sch = list(self.neocortex.query(q, top_k=max(4, k or 4)))
+            if sch:
+                # Express schema scores in hippocampal units so the weight is a
+                # real routing decision rather than an arbitrary constant that
+                # happens to sit below every episodic score.
+                generic = bool(_GENERIC.search(query))
+                w = cfg.w_schema * (cfg.schema_generic_boost if generic else 1.0)
+                vals = np.array([r.score for r in sch], dtype=np.float32)
+                lo, hi = float(vals.min()), float(vals.max())
+                rng = hi - lo
+                for r in sch:
+                    norm = (r.score - lo) / rng if rng > 1e-6 else 1.0
+                    r.score = w * hmax * float(norm)
+                    r.evidence["routed_generic"] = float(generic)
+                    out.append(r)
+
         out.sort(key=lambda r: r.score, reverse=True)
 
-        # Collapse duplicates by text, keeping the highest-scoring copy. A
-        # memory that surfaced through both stores is one memory.
-        deduped: list[Recall] = []
-        seen_text: set[str] = set()
-        for r in out:
-            if r.episode.text in seen_text:
-                continue
-            seen_text.add(r.episode.text)
-            deduped.append(r)
-        top = deduped[:k]
+        if dedup:
+            # A memory that surfaced through both stores is one memory.
+            deduped: list[Recall] = []
+            seen_text: set[str] = set()
+            for r in out:
+                if r.episode.text in seen_text:
+                    continue
+                seen_text.add(r.episode.text)
+                deduped.append(r)
+            out = deduped
+        top = out if k is None else out[:k]
 
-        # Retrieval is itself a rehearsal event: recalling strengthens.
-        for r in top:
-            slot = self.ca1.slot_of(r.episode.key())
-            if slot is not None and (tr := self.ca1.get(slot)):
-                tr.strength = min(1.0, tr.strength + 0.05)
+        if rehearse:
+            # Retrieval is itself a rehearsal event: recalling strengthens. A
+            # schema hit carries a placeholder key and rehearses nothing.
+            for r in top:
+                if r.source != "hippocampus":
+                    continue
+                slot = self.ca1.slot_of(r.episode.key())
+                if slot is not None and (tr := self.ca1.get(slot)):
+                    tr.strength = min(1.0, tr.strength + 0.05)
         return top
 
     def complete_partial(self, key: tuple[int, int], keep: float = 0.15) -> Recall | None:
@@ -377,9 +511,11 @@ class EngramMemory:
         confidently onto unrelated attractors, which is worse than failing.
 
         What CA3 does do, measured in ``bench/ca3_capacity.py``: recover the
-        right episode from 90% deletion of its active units at 100% accuracy,
-        flat from 400 to 4,000 stored patterns, degrading only when fewer than
-        about three units survive. For text queries use :meth:`recall`.
+        right episode from 90% deletion of its active units (six of 61 kept)
+        at 0.993 accuracy with 400 stored patterns and 0.907 with 4,000. It
+        degrades slowly with store size and sharply once fewer than about
+        three units survive. v0.1 described this as flat at 100%, which the
+        committed script never showed. For text queries use :meth:`recall`.
 
         ``keep`` is the fraction of the original code's active units retained.
         """
@@ -415,10 +551,21 @@ class EngramMemory:
 
     # ---------------------------------------------------------------- sleep
 
-    def sleep(self, cycles: int = 10) -> list:
-        """Run ``cycles`` ripple bursts. Where generalisation happens."""
-        now = time.time()
-        return [self.replay.ripple(self.ca1, self.neocortex, now) for _ in range(cycles)]
+    def sleep(self, cycles: int = 10, now: float | None = None) -> list:
+        """Run ``cycles`` ripple bursts. Where generalisation happens.
+
+        Replay priority has a recency term, measured from ``now`` (default: the
+        wall clock). Pass ``now`` explicitly, with explicit episode timestamps,
+        for a run that must be reproducible: v0.1 always read the clock, so two
+        identical benchmark runs could consolidate different schemas and
+        report different abstraction scores.
+        """
+        now = time.time() if now is None else now
+        events = []
+        for _ in range(cycles):
+            events.append(self.replay.ripple(self.ca1, self.neocortex, now))
+            self._reconcile()
+        return events
 
     # ---------------------------------------------------------------- misc
 
@@ -426,7 +573,7 @@ class EngramMemory:
         s = {
             "written": float(self._n_written),
             "hippocampal": float(len(self.ca1)),
-            "ca3_patterns": float(len(self.ca3)),
+            "ca3_patterns": float(self.ca3.resident),
             "ripples": float(self.replay.step),
         }
         s.update({f"dg_{k}": v for k, v in self.dg.stats().items()})

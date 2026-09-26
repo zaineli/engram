@@ -98,6 +98,11 @@ class CA3:
     def __len__(self) -> int:
         return len(self._rows)
 
+    @property
+    def resident(self) -> int:
+        """Patterns still stored; ``len`` also counts removed slots, which keep their index."""
+        return sum(1 for r in self._rows if r.size)
+
     def store(self, code: np.ndarray) -> int:
         """Write one sparse code; returns its pattern index."""
         self._rows.append(np.asarray(code, dtype=np.int32))

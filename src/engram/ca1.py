@@ -72,16 +72,25 @@ class CA1:
         return float(np.clip(1.0 - (M @ dense).max(), 0.0, 1.0))
 
     def decay(self, rate: float = 0.995, floor: float = 0.05) -> list[int]:
-        """Apply passive forgetting; return slots that fell below ``floor``.
+        """Apply passive forgetting; return consolidated slots below ``floor``.
 
         Trace strength decays every step and is refreshed by replay and by
-        successful retrieval. Anything that is never retrieved and never
-        replayed eventually drops out, which is the intended behaviour: an
-        episodic store that only grows is not a memory system, it is a log.
+        successful retrieval. A *consolidated* trace that is never retrieved
+        and never replayed eventually drops out of the fast store, which is the
+        intended behaviour: its gist is held by the neocortex, and an episodic
+        store that only grows is not a memory system, it is a log.
+
+        An unconsolidated trace only loses retrievability, never residency.
+        Nothing else holds it, so dropping it would be data loss. Until v0.2
+        the test here was inverted (``not tr.consolidated``), so passive decay
+        deleted exactly the traces the rest of the system promises never to
+        delete. At the default rate a trace needs about 6,000 unrefreshed
+        writes to cross the floor, more than any benchmark in this repository
+        writes, so no reported number was affected.
         """
         dead: list[int] = []
         for slot, tr in self._traces.items():
             tr.strength *= rate
-            if tr.strength < floor and not tr.consolidated:
+            if tr.strength < floor and tr.consolidated:
                 dead.append(slot)
         return dead

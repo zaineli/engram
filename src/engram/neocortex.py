@@ -96,15 +96,14 @@ class Neocortex:
         """Gist retrieval. Returns schema exemplars, not episodes.
 
         Ranking combines centroid similarity with accumulated ``mass``, and the
-        mass term is not a tie-breaker — it is most of the signal. Asked *"which
-        project does Priya usually work on"*, every schema about Priya has
-        roughly the same centroid similarity (measured: 0.483 to 0.505, a spread
-        of 0.02). What distinguishes them is how much evidence each accumulated:
-        47.7 for the modal project against 9.3 for the rarest. Similarity finds
-        the topic; mass answers "usually". An earlier version ranked on
-        similarity alone and the abstraction task did not move at all when this
-        pathway was ablated, because it was picking essentially at random among
-        the right person's schemas.
+        mass term is not a tie-breaker. Asked *"which project does Priya usually
+        work on"* (``bench/schemas.py``, seed 0), Priya's 12 schemas span
+        similarity 0.311-0.562, and the most similar one is an *ingest* schema
+        of mass 4.1; similarity alone answers wrongly. Mass spans 2.4-53.2, and
+        with it the top schema is an *atlas* one, her modal project (30 of 50
+        events). Similarity finds the topic; mass answers "usually". An earlier
+        version ranked on similarity alone and the abstraction task did not
+        move when this pathway was ablated.
         """
         C = self._stack()
         if C.shape[0] == 0:

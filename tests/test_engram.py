@@ -71,7 +71,7 @@ def test_neurogenesis_spreads_recruitment(enc):
 
 
 def test_ca3_completes_from_heavily_degraded_cue(enc):
-    """The capacity claim: recover from 90% deletion, flat in store size."""
+    """The capacity claim: recover from 90% deletion of the cue's units."""
     dg = DentateGyrus(enc.dim, expansion=8, seed=2)
     ca3 = CA3(dg.dim_out, beta=22.0)
     V = enc.encode([f"event {i} concerning subsystem {i % 11}" for i in range(500)])
@@ -209,3 +209,144 @@ def test_neocortex_schema_ranking_uses_mass():
     mid = (a + b); mid /= np.linalg.norm(mid)
     top = nc.query(mid, top_k=1)[0]
     assert "frequent" in top.episode.text
+
+
+# ------------------------------------------------------------- v0.2 fixes
+
+
+def test_recall_can_be_read_only(enc):
+    m = EngramMemory(encoder=enc)
+    for i in range(20):
+        m.remember(f"event {i} concerning subsystem {i % 5}", session=0)
+    before = {t.key: t.strength for t in m.ca1.traces()}
+    m.recall("subsystem 3", k=5, rehearse=False)
+    assert {t.key: t.strength for t in m.ca1.traces()} == before
+    m.recall("subsystem 3", k=5)
+    assert {t.key: t.strength for t in m.ca1.traces()} != before
+
+
+def test_full_ranking_covers_every_trace(enc):
+    m = EngramMemory(encoder=enc)
+    for i in range(30):
+        m.remember("the same sentence" if i % 3 == 0 else f"distinct event {i}", session=0)
+    got = m.recall("same sentence", k=None, include_schemas=False, rehearse=False, dedup=False)
+    assert len(got) == 30 and len({r.episode.key() for r in got}) == 30
+
+
+def test_loose_temporal_word_keeps_the_anchor(enc):
+    """'How many days before X did I Y' needs X as evidence; v0.1 multiplied it by 0.15."""
+    m = EngramMemory(encoder=enc)
+    m.remember("I bought the new phone at the mall on Friday", session=0)
+    m.remember("the weather was mild all week", session=0)
+    m.remember("I attended the holiday market with my sister", session=1)
+    m.remember("we repainted the garage door", session=1)
+    top = m.recall("How many days before I bought the new phone did I attend the holiday market?", k=2)
+    texts = [r.episode.text for r in top]
+    assert any("phone" in t for t in texts) and any("market" in t for t in texts)
+    assert all("anchor" not in r.evidence for r in top)
+
+
+def test_adjacency_cue_still_suppresses_the_anchor(enc):
+    m = EngramMemory(encoder=enc)
+    for what in ["drafted the atlas plan", "reviewed the ledger diff", "shipped the beacon runbook"]:
+        m.remember(f"Priya {what}", session=0)
+    top = m.recall("what did Priya do immediately after she drafted the atlas plan?", k=1)
+    assert top[0].episode.text == "Priya reviewed the ledger diff"
+
+
+def test_schema_hits_neither_anchor_nor_rehearse(enc):
+    m = EngramMemory(encoder=enc)
+    for i in range(40):
+        m.remember(f"Priya reviewed the atlas runbook in week {i}", session=0)
+    m.sleep(cycles=10)
+    first = m.ca1.get(m.ca1.slot_of((0, 0)))
+    first.strength = 0.5
+    # dedup=False: a schema exemplar is the text of a stored episode and would
+    # otherwise be folded into its episodic copy before rehearsal.
+    got = m.recall("what does Priya usually do right after a review?", k=60, dedup=False)
+    schemas = [r for r in got if r.source == "neocortex"]
+    assert schemas and all(r.episode.key() == (0, 0) for r in schemas), "setup"
+    assert all("anchor" not in r.evidence and "reinstated" not in r.evidence for r in schemas)
+    episodic_keys = {r.episode.key() for r in got if r.source == "hippocampus"}
+    expected = 0.55 if (0, 0) in episodic_keys else 0.5
+    assert first.strength == pytest.approx(expected), "a schema hit rehearsed the trace at (0, 0)"
+
+
+def test_passive_decay_never_drops_an_unconsolidated_trace(enc):
+    m = EngramMemory(encoder=enc, config=EngramConfig(decay_rate=0.5, decay_floor=0.05))
+    for i in range(40):
+        m.remember(f"event {i}", session=0)
+    assert m.stats()["retention"] == 1.0, "decay deleted traces nothing else holds"
+    for t in m.ca1.traces()[:10]:
+        t.consolidated = True
+    m.remember("one more write", session=0)
+    assert len(m.ca1) == 31  # the ten consolidated, decayed traces are released
+
+
+def test_released_traces_leave_every_structure(enc):
+    """v0.1 released evicted traces from CA1 only; their CA3 attractors stayed."""
+    m = EngramMemory(encoder=enc, config=EngramConfig(hippocampal_capacity=30))
+    for i in range(80):
+        m.remember(f"event {i} happened in region {i % 7}", session=0)
+    m.sleep(cycles=25)
+    assert len(m.ca1) < 80, "setup: eviction should have happened"
+    assert m.ca3.resident == len(m.ca1) == len(m.conj_index)
+
+
+@pytest.mark.parametrize("how", ["minmax", "zscore"])
+def test_fusion_normalisers_ignore_pathway_scale(how):
+    from engram.memory import _normalise
+
+    v = np.random.default_rng(0).normal(size=50)
+    assert np.allclose(_normalise(v, how), _normalise(3.7 * v + 11.0, how))
+
+
+def test_rrf_normaliser_depends_only_on_order():
+    from engram.memory import _normalise
+
+    v = np.random.default_rng(1).normal(size=50)
+    assert np.allclose(_normalise(v, "rrf"), _normalise(np.exp(v), "rrf"))
+    assert _normalise(v, "rrf").max() == pytest.approx(1 / 61)
+
+
+def test_constant_pathway_contributes_nothing():
+    from engram.memory import _normalise
+
+    for how in ("minmax", "zscore", "rrf"):
+        assert not np.any(_normalise(np.full(10, 0.3), how))
+
+
+def test_unknown_fusion_is_rejected(enc):
+    with pytest.raises(ValueError):
+        EngramMemory(encoder=enc, config=EngramConfig(fusion="sum"))
+
+
+def test_reconfigure_equals_a_fresh_build(enc):
+    """Sweeps reuse one ingested memory; that must change nothing but speed."""
+    texts = [f"In week {i % 9} on day {i % 7}, person {i % 4} touched project {i % 5}" for i in range(60)]
+    base = EngramConfig(fusion="minmax", w_conjunctive=1.2, conj_weighting="binary")
+    target = dict(fusion="zscore", w_conjunctive=0.3, conj_weighting="idf", w_reinstate=1.0)
+    reused = EngramMemory(encoder=enc, config=base)
+    fresh = EngramMemory(encoder=enc, config=EngramConfig(**{**base.__dict__, **target}))
+    for m in (reused, fresh):
+        for i, t in enumerate(texts):
+            m.remember(t, session=i % 3)
+    reused.reconfigure(**target)
+    for q in ("person 2 project 3 week 4", "what did person 1 do right after project 2"):
+        a = reused.recall(q, k=None, rehearse=False, dedup=False)
+        b = fresh.recall(q, k=None, rehearse=False, dedup=False)
+        assert [r.episode.key() for r in a] == [r.episode.key() for r in b]
+        assert [r.score for r in a] == pytest.approx([r.score for r in b])
+    with pytest.raises(ValueError):
+        reused.reconfigure(conj_window=2)
+
+
+def test_consolidation_is_reproducible_given_a_clock(enc):
+    def build():
+        m = EngramMemory(encoder=enc)
+        for i in range(60):
+            m.remember(f"Priya reviewed project {i % 4} in week {i}", session=0, timestamp=60.0 * i)
+        m.sleep(cycles=15, now=3600.0)
+        return [(s.label, round(s.mass, 9), tuple(s.support)) for s in m.neocortex.schemas]
+
+    assert build() == build()
