@@ -38,7 +38,8 @@ def main() -> None:
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--max-n", type=int, default=4000)
     args = ap.parse_args()
-    enc, name = build_encoder(args.fast)
+    name = "hashing" if args.fast else "minilm"
+    enc = build_encoder(name)
     V = enc.encode(corpus(args.max_n))
     print(f"encoder={name}\n")
 

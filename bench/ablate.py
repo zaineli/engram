@@ -7,7 +7,12 @@ number when removed is not a mechanism; it is a decoration, and the honest
 thing is to find that out and say so (see ``lateral inhibition`` in
 :mod:`engram.dentate`, which is exactly that and is documented as such).
 
-    uv run --extra bench python bench/ablate.py --fast
+Scores are the primary scores of ``bench/run.py`` (key-level where a query has
+a key), pooled over seeds, with each ablation compared to the full system on
+the same queries by a paired bootstrap interval and randomisation test.
+
+    python bench/ablate.py --fast
+    python bench/ablate.py --encoder minilm --seeds 5 [--paraphrase]
 """
 
 from __future__ import annotations
@@ -15,21 +20,24 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from generate import build_corpus  # noqa: E402
-from paraphrase import paraphrase_corpus  # noqa: E402
-from run import TASKS, build_encoder, evaluate  # noqa: E402
-
-from engram import EngramConfig, EngramMemory  # noqa: E402
+from run import TASKS, build_encoder, build_engram, engram_search, evaluate, make_corpus, primary  # noqa: E402
+from stats import compare  # noqa: E402
 
 ABLATIONS: dict[str, dict] = {
     "full": {},
     "-semantic": {"w_semantic": 0.0},
     "-conjunctive": {"w_conjunctive": 0.0},
+    "conj: all pairs": {"conj_window": None},
+    "conj: unigrams": {"conj_order": 1},
+    "conj: binary": {"conj_weighting": "binary"},
+    "fusion: minmax": {"fusion": "minmax"},
+    "fusion: rrf": {"fusion": "rrf"},
     "-temporal-ctx": {"w_temporal": 0.0},
     "-reinstatement": {"w_reinstate": 0.0},
     "-schema": {"w_schema": 0.0},
@@ -41,52 +49,58 @@ ABLATIONS: dict[str, dict] = {
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fast", action="store_true")
+    ap.add_argument("--encoder", default="minilm")
     ap.add_argument("--people", type=int, default=16)
     ap.add_argument("--events", type=int, default=50)
     ap.add_argument("--paraphrase", action="store_true")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seeds", type=int, default=5)
+    ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--sleep-cycles", type=int, default=40)
     ap.add_argument("--out", type=str, default="")
     args = ap.parse_args()
 
-    corpus = build_corpus(n_people=args.people, events_per_person=args.events, seed=args.seed)
-    if args.paraphrase:
-        corpus = paraphrase_corpus(corpus, seed=args.seed)
-    encoder, enc_name = build_encoder(args.fast)
+    enc_name = "hashing" if args.fast else args.encoder
+    encoder = build_encoder(enc_name)
     mode = "paraphrased" if args.paraphrase else "token-literal"
-    print(f"{len(corpus.episodes)} episodes  {len(corpus.queries)} queries  "
-          f"encoder={enc_name}  queries={mode}\n")
+    print(f"seeds 0..{args.seeds - 1}  encoder={enc_name}  queries={mode}\n")
+
+    rows: dict[str, list[dict]] = {name: [] for name in ABLATIONS}
+    for seed in range(args.seeds):
+        corpus = make_corpus(seed, args)
+        for name, overrides in ABLATIONS.items():
+            ov = dict(overrides)
+            no_sleep = ov.pop("__no_sleep__", False)
+            mem = build_engram(corpus, encoder, seed, 0 if no_sleep else args.sleep_cycles, ov)
+            rows[name].extend(evaluate(engram_search(mem), corpus, args.k))
+    if hasattr(encoder, "save"):
+        encoder.save()
+
+    def prim(name: str, task: str | None = None) -> list[float]:
+        return [r[primary(r["task"])] for r in rows[name] if task is None or r["task"] == task]
 
     results: dict[str, dict] = {}
-    for name, overrides in ABLATIONS.items():
-        no_sleep = overrides.pop("__no_sleep__", False)
-        cfg = replace(EngramConfig(seed=args.seed), **overrides)
-        mem = EngramMemory(encoder=encoder, config=cfg)
-        for text, key in zip(corpus.episodes, corpus.keys):
-            mem.remember(text, session=key[0])
-        if not no_sleep:
-            mem.sleep(cycles=args.sleep_cycles)
-        results[name] = evaluate(
-            lambda q, k: [(r.episode.text, r.score, r.episode.key()) for r in mem.recall(q, k=k)],
-            corpus, 5,
-        )
-        print(f"  {name:16s} overall top1={results[name]['overall']['top1']:.3f}")
+    for name in ABLATIONS:
+        results[name] = {t: float(np.mean(prim(name, t))) for t in TASKS}
+        results[name]["overall"] = float(np.mean(prim(name)))
+        if name != "full":
+            results[name]["vs_full"] = compare(prim(name), prim("full"))
+            results[name]["vs_full_by_task"] = {t: compare(prim(name, t), prim("full", t)) for t in TASKS}
 
-    base = results["full"]
-    hdr = f"{'ablation':<16}" + "".join(f"{t:>14}" for t in TASKS) + f"{'overall':>10}{'delta':>9}"
-    print("\n" + "=" * len(hdr))
+    hdr = f"{'ablation':<18}" + "".join(f"{t:>14}" for t in TASKS) + f"{'overall':>10}{'delta':>9}  95% CI"
+    print("=" * (len(hdr) + 16))
     print(hdr)
-    print("-" * len(hdr))
+    print("-" * (len(hdr) + 16))
     for name, r in results.items():
-        row = f"{name:<16}" + "".join(f"{r[t]['top1']:>14.3f}" for t in TASKS)
-        d = r["overall"]["top1"] - base["overall"]["top1"]
-        row += f"{r['overall']['top1']:>10.3f}" + (f"{d:>+9.3f}" if name != "full" else f"{'--':>9}")
+        row = f"{name:<18}" + "".join(f"{r[t]:>14.3f}" for t in TASKS) + f"{r['overall']:>10.3f}"
+        if name != "full":
+            c = r["vs_full"]
+            row += f"{c['diff']:>+9.3f}  [{c['lo']:+.3f}, {c['hi']:+.3f}]"
         print(row)
-    print("=" * len(hdr))
+    print("=" * (len(hdr) + 16))
 
     if args.out:
         Path(args.out).write_text(json.dumps(
-            {"encoder": enc_name, "query_mode": mode, "results": results}, indent=2))
+            {"encoder": enc_name, "query_mode": mode, "seeds": args.seeds, "results": results}, indent=1))
         print(f"wrote {args.out}")
 
 
